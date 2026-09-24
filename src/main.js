@@ -771,6 +771,9 @@ import {
     // ── Main entry: called after song_info arrives ──
     async function onSongReady() {
         teardown();
+        // Capture this load BEFORE the first await. A preload, ready event, or
+        // leaving the player can supersede us during cold worklet registration.
+        const gen = S.loadGeneration;
         const info = currentSongInfo();
         const stems = (info && info.stems) || [];
         // Archive or stem-less sloppak — no graph to build, but keep the event
@@ -783,7 +786,9 @@ import {
         // Decide per-song whether the pitch-preserving worklet is available.
         // Done before buildGraphFromBuffers so the graph is built for the right
         // path. Falls back to legacy (pitch-coupling) playback otherwise.
-        S.useWorklet = await ensureWorklet();
+        const useWorklet = await ensureWorklet();
+        if (gen !== S.loadGeneration) return;
+        S.useWorklet = useWorklet;
         if (!S.useWorklet && !S.workletWarned) {
             S.workletWarned = true;
             console.warn('[stems] AudioWorklet unavailable — speed control will change pitch (legacy mode)');
@@ -815,10 +820,6 @@ import {
             nativeCorePause(core);
         }
 
-        // teardown() above already bumped S.loadGeneration; adopt that value as
-        // this load's generation. Nothing else mutates it until the next
-        // teardown(), which is exactly what invalidates an in-flight load.
-        const gen = S.loadGeneration;
         S.abortController = new AbortController();
 
         // Pristine full-mix mixdown, if the pack ships one. This is the RESERVED
