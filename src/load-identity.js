@@ -34,6 +34,10 @@ export class LoadIdentity {
     ready(ref) {
         if (ref.sessionId && this.retired.has(ref.sessionId)) return null;
         const c = this.current;
+        // After a canonical session ended, its keyless aliases cannot resurrect
+        // the old highway data. A new canonical session must establish identity.
+        // A genuinely legacy-only host can still enter using a named song.
+        if (!c && !ref.sessionId && (this.retired.size || !ref.filename)) return null;
         const differentSession = ref.sessionId && c?.sessionId && ref.sessionId !== c.sessionId;
         const differentFile = ref.filename && c?.filename && ref.filename !== c.filename;
         if (differentFile && c?.sessionId && !ref.sessionId) return null;

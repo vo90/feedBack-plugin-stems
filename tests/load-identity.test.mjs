@@ -71,6 +71,7 @@ test('ready-only entry and changed full mix initialize the actual resource',()=>
     assert.equal(h.calls.builds,2);
     h.hooks.teardown();const gen=h.S.preloadGen;
     h.hooks.onPlaybackReady(canonical('one','final'));
+    h.hooks.onPlaybackReady({filename:'A'});h.hooks.onPlaybackReady({});
     assert.equal(h.S.currentFilename,null);assert.equal(h.S.preloadGen,gen);
 });
 
