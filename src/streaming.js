@@ -17,7 +17,7 @@ import { publishAudioGraph } from './audio-graph-publish.js';
 import { computeMixGains } from './mix-gains.js';
 import { clampVolume } from './util.js';
 import { parseWavHeader, pcm16ToFloat32 } from './wav-pcm.js';
-import { karaokeDefault, loadDefaultMuted, loadMuted, loadVolumes } from './prefs.js';
+import { readSongPreferences, preferredStemState } from './song-preferences.js';
 
 // Injected seams to main.js's transport/orchestration layer. Injected (not
 // imported) to avoid a static import cycle: transport already imports
@@ -414,22 +414,10 @@ export async function setupStreaming(stems, probeResp, fullUrl, gen) {
         return false;
     }
 
-    const karaoke = karaokeDefault();
-    const defaultMuted = loadDefaultMuted();
-    const savedMuted = loadMuted(S.currentFilename);
-    const savedVols = loadVolumes(S.currentFilename);
+    const preferences = readSongPreferences(S.currentFilename, S.currentSongKey);
     S.stemState = built.map((t, i) => {
         const gain = makeStemGainHandle(i);
-        let on;
-        if (savedMuted) {
-            on = !savedMuted.has(t.id);
-        } else {
-            on = !!t.default;
-            if (defaultMuted.has(t.id)) on = false;
-            if (karaoke && /vocal/i.test(t.id)) on = false;
-        }
-        const vol = clampVolume(savedVols[t.id]);
-        const initialVol = vol == null ? 1 : vol;
+        const { on, vol: initialVol } = preferredStemState(t, preferences);
         gain.gain.value = on ? initialVol : 0;
         return { id: t.id, url: t.url, default: t.default, buffer: null, source: null, gain, on, vol: initialVol };
     });

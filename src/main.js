@@ -1,4 +1,6 @@
 import { computeMixGains } from './mix-gains.js';
+import { LoadIdentity } from './load-identity.js';
+import { readSongPreferences, preferredStemState, refreshSongPreferences } from './song-preferences.js';
 import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
@@ -13,7 +15,7 @@ import {
 import {
     karaokeDefault, setKaraokeDefault,
     loadDefaultMuted, saveDefaultMuted,
-    loadMuted, saveMuted, loadVolumes, saveVolume,
+    saveMuted, saveVolume,
 } from './prefs.js';
 import {
     S, SH, ST, transport, registeredMixParticipantIds, pointerCleanupHandlers, claimSnapshots,
@@ -48,6 +50,17 @@ import {
     const KEYBOARD_VOLUME_STEP = 0.02;
     const KEYBOARD_VOLUME_STEP_LARGE = 0.1;
     const PRIMARY_BUTTON_MASK = 1;
+    const loadIdentity = new LoadIdentity();
+    const preferenceEdits = new Map();
+    const pendingPreferences = new Set();
+    function rememberPreference(stem, edit) {
+        preferenceEdits.set(stem.id, { ...preferenceEdits.get(stem.id), ...edit });
+    }
+    function refreshPreferences(onlyPending = false) {
+        refreshSongPreferences({ stems: S.stemState, filename: S.currentFilename, key: S.currentSongKey,
+            edits: preferenceEdits, claims: claimSnapshots, pending: pendingPreferences, onlyPending,
+            apply(stem, on, vol) { applyStemState(stem, on, vol); updateStemButton(stem); } });
+    }
 
     // Wire the streaming layer's seams back to the transport/orchestration layers
     // (streaming.js can't import them — transport imports streaming). transportPlay
@@ -161,6 +174,7 @@ import {
         if (clamped == null) return false;
         const changed = stem.vol !== clamped;
         stem.vol = clamped;
+        if (options.persist !== false || options.userGesture) rememberPreference(stem, { vol: clamped });
         if (stem.on && stem.gain) stem.gain.gain.value = clamped;
         updateStemButton(stem, options);
         if (options.persist !== false && changed) saveVolume(storageSongKey(), stem.id, clamped);
@@ -171,7 +185,7 @@ import {
         const rect = bounds || button.getBoundingClientRect();
         if (!rect.width) return false;
         const volume = (event.clientX - rect.left) / rect.width;
-        return setStemVolume(stem, volume, options);
+        return setStemVolume(stem, volume, { ...options, userGesture: true });
     }
 
     // ── Loading overlay ──
@@ -419,10 +433,10 @@ import {
                     if (event.type === 'pointerup') {
                         event.preventDefault();
                         setStemVolumeFromPointer(s, btn, event, { persist: false }, pointerBounds);
-                        saveVolume(pointerFilename, s.id, s.vol);
+                        if (pointerFilename === S.currentFilename) saveVolume(storageSongKey(), s.id, s.vol);
                         setTimeout(() => { suppressNextClick = false; }, 0);
                     } else {
-                        setStemVolume(s, pointerStartVolume, { persist: false });
+                        setStemVolume(s, pointerStartVolume, { persist: false, userGesture: true });
                         suppressNextClick = false;
                     }
                 }
@@ -449,6 +463,7 @@ import {
                     return;
                 }
                 s.on = !s.on;
+                rememberPreference(s, { on: s.on });
                 if (s.gain) s.gain.gain.value = s.on ? s.vol : 0;
                 updateStemButton(s);
                 saveMuted(storageSongKey(), S.stemState);
@@ -561,15 +576,7 @@ import {
             return false;
         }
 
-        const karaoke = karaokeDefault();
-        const defaultMuted = loadDefaultMuted();
-        const key = storageSongKey();
-        const savedMuted = loadMuted(key) || (S.currentSongKey ? loadMuted(S.currentFilename) : null);
-        const savedVols = (() => {
-            const primary = loadVolumes(key);
-            if (Object.keys(primary).length || !S.currentSongKey) return primary;
-            return loadVolumes(S.currentFilename);
-        })();
+        const preferences = readSongPreferences(S.currentFilename, S.currentSongKey);
 
         // S.masterGain sums every stem and is driven by the Song fader.
         S.masterGain = S.audioCtx.createGain();
@@ -621,17 +628,7 @@ import {
 
             // Saved per-song state wins; then default-muted preset; then
             // karaoke override; then manifest default.
-            let on;
-            if (savedMuted) {
-                on = !savedMuted.has(r.id);
-            } else {
-                on = !!r.default;
-                if (defaultMuted.has(r.id)) on = false;
-                if (karaoke && /vocal/i.test(r.id)) on = false;
-            }
-
-            const vol = clampVolume(savedVols[r.id]);
-            const initialVol = vol == null ? 1 : vol;
+            const { on, vol: initialVol } = { ...preferredStemState(r, preferences), ...preferenceEdits.get(r.id) };
             gain.gain.value = on ? initialVol : 0;
 
             if (r.buffer.duration > maxDur) maxDur = r.buffer.duration;
@@ -933,9 +930,10 @@ import {
         const stems = Array.isArray(info && info.stems) ? info.stems : [];
         const filename = (info && info.filename) || (window.slopsmith && window.slopsmith.currentSong && window.slopsmith.currentSong.filename) || S.currentFilename || '';
         return JSON.stringify({
-            songKey: S.currentSongKey || '',
             filename,
             stems: stems.map(s => ({ id: s.id, url: s.url, default: !!s.default })),
+            fullMixUrl: (info && (info.has_full_mix || info.has_original_audio))
+                ? info.full_mix_url || info.original_audio_url || null : null,
         });
     }
 
@@ -950,6 +948,8 @@ import {
         const payload = detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : (detail || {});
         const target = payload.target && typeof payload.target === 'object' ? payload.target : {};
         return {
+            sessionId: payload.sessionId || null,
+            targetId: target.targetId || null,
             songKey: target.settingsKey || payload.settingsKey || null,
             filename: payload.filename || target.filename || null,
         };
@@ -962,10 +962,13 @@ import {
     // second, identical build.
     function currentSongInfo() {
         const live = highway.getSongInfo && highway.getSongInfo();
-        if (live && Array.isArray(live.stems) && live.stems.length) return live;
+        const liveFilename = window.slopsmith?.currentSong?.filename;
+        if (S.liveInfoReady && liveFilename === S.currentFilename && live && Array.isArray(live.stems)) {
+            return { ...live, filename: S.currentFilename };
+        }
         const pre = S.preloadInfo;
         if (pre && pre.filename && pre.filename === S.currentFilename) return pre;
-        return live || null;
+        return null;
     }
 
     // Start the whole load — fetch, decode, and the graph build — as soon as the
@@ -1032,20 +1035,46 @@ import {
         S.pollHandle = myHandle;
     }
 
+    function acceptLoad(ref) {
+        if (!ref) return false;
+        if (ref.newLoad) {
+            S.readySignature = null;
+            S.preloadGen++;
+            teardown();
+            S.preloadInfo = null;
+            S.liveInfoReady = false;
+            preferenceEdits.clear(); pendingPreferences.clear();
+            S.currentSongKey = null; S.currentFilename = null;
+        }
+        const changedKey = ref.songKey !== S.currentSongKey;
+        S.currentSongKey = ref.songKey;
+        S.currentFilename = ref.filename;
+        if (changedKey && S.stemState.length) refreshPreferences();
+        return true;
+    }
+
+    function endCurrentLoad() {
+        loadIdentity.end();
+        S.preloadGen++;
+        S.preloadInfo = null; S.readySignature = null; S.liveInfoReady = false;
+        S.currentFilename = null; S.currentSongKey = null;
+        preferenceEdits.clear(); pendingPreferences.clear();
+        teardown();
+    }
+
     // ── Playback lifecycle hooks ──
     function installHooks() {
         const hookState = window.__slopsmithStemsHooks || (window.__slopsmithStemsHooks = {});
         hookState.impl = {
             onPlaybackLoading(detail = {}) {
-                const ref = songRefFromDetail(detail);
-                S.readySignature = null;
-                teardown();
-                S.currentSongKey = ref.songKey;
-                S.currentFilename = ref.filename || S.currentFilename || null;
+                const ref = loadIdentity.loading(songRefFromDetail(detail));
+                if (!acceptLoad(ref)) return;
                 // Get the whole load underway NOW — before the highway (and the
                 // venue) is on screen. See preloadSong for why that matters.
-                S.preloadInfo = null;
-                preloadSong(S.currentFilename);
+                if (S.currentFilename && !loadIdentity.current.preloaded) {
+                    loadIdentity.current.preloaded = true;
+                    preloadSong(S.currentFilename);
+                }
             },
             onPlaybackReady(detail = {}) {
                 // A `ready` alias (playback:ready / song:loaded / song:ready)
@@ -1056,15 +1085,18 @@ import {
                 // event's own target — but only when the ready detail actually
                 // carries a key, so a keyless ready that follows a good loading
                 // never wipes a valid key.
-                const ref = songRefFromDetail(detail);
-                if (ref.songKey) S.currentSongKey = ref.songKey;
-                if (ref.filename) S.currentFilename = ref.filename;
+                const ref = loadIdentity.ready(songRefFromDetail(detail));
+                if (ref && !ref.filename && window.slopsmith?.currentSong?.filename) {
+                    ref.filename = loadIdentity.current.filename = window.slopsmith.currentSong.filename;
+                }
+                if (!acceptLoad(ref)) return;
+                S.liveInfoReady = true;
                 if (!tryInitForCurrentSong()) startReadyPoll();
             },
             onPlaybackStopped() {
                 lightStop();
             },
-            teardown,
+            teardown: endCurrentLoad,
         };
         if (hookState.installed) return;
         S.wired = true;
@@ -1408,6 +1440,7 @@ import {
             }
             claimSnapshots.delete(key);
         }
+        refreshPreferences(true);
         return { outcome: 'handled', payload: redactedSongRef({ claimId, restoredIds }) };
     }
 
@@ -1548,6 +1581,7 @@ import {
             for (const s of S.stemState) {
                 if (s.id.toLowerCase() !== target) continue;
                 s.on = !m;
+                rememberPreference(s, { on: s.on });
                 if (s.gain) s.gain.gain.value = s.on ? s.vol : 0;
                 updateStemButton(s);
                 saveMuted(storageSongKey(), S.stemState);

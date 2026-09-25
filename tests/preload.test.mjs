@@ -58,7 +58,7 @@ test('the load starts on song:loading, not on the highway being ready', () => {
     assert.match(fn, /preloadSong\s*\(/,
         'song:loading must kick off the load — waiting for the WS `ready` is what put ' +
         'the whole-song PCM copy on top of a live venue');
-    assert.match(fn, /S\.preloadInfo\s*=\s*null/,
+    assert.match(block(SRC, 'function acceptLoad('), /S\.preloadInfo\s*=\s*null/,
         'a new song must not inherit the previous song\'s preloaded stem list');
 });
 
