@@ -125,3 +125,23 @@ test('pause cancels a queued native start without treating cancellation as a rou
     assert.equal(fixture.events.includes('play'), false);
     S.loadGeneration++; releaseNativePlayback(); await fixture.h.queue(() => {});
 });
+
+test('native completion exposes the exact media endpoint to Core and a later seek clears it', { skip: !coreDir }, async () => {
+    const fixture = pairedHarness(); await tryNativePlayback(); await fixture.audio.play();
+    let terminal;
+    fixture.audio.addEventListener('ended', () => {
+        terminal = { time: fixture.audio.currentTime, duration: fixture.audio.duration, paused: fixture.audio.paused };
+    });
+    fixture.h.player._pos = 100 - 1e-10;
+    fixture.h.player._sourcePlaying = false;
+    fixture.h.player._sourceEnded = true;
+    await fixture.h.host.check();
+    assert.deepEqual(terminal, { time: 100, duration: 100, paused: true });
+    await fixture.h.queue(() => {});
+    assert.equal(fixture.nativeAudible, false);
+    fixture.audio.currentTime = 20;
+    await until(() => fixture.events.includes('seeked'));
+    assert.equal(fixture.audio.currentTime, 20);
+    await fixture.audio.play(); assert.equal(fixture.audio.paused, false);
+    S.loadGeneration++; releaseNativePlayback(); await fixture.h.queue(() => {});
+});
