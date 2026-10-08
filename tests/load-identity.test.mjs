@@ -19,7 +19,7 @@ function harness() {
     const calls = { builds: 0, preloads: [], refreshes: 0 };
     let live = {};
     const window = { __slopsmithStemsHooks: { installed: true }, slopsmith: { currentSong: null } };
-    const scope = { S, window, LoadIdentity, loadIdentity: new LoadIdentity(),
+    const scope = { tryNativePlayback: () => Promise.resolve(false), S, window, LoadIdentity, loadIdentity: new LoadIdentity(),
         preferenceEdits: new Map(), pendingPreferences: new Set(), console,
         highway: { getSongInfo: () => live },
         teardown() { S.loadGeneration++; S.stemState=[]; },

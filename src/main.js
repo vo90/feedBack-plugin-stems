@@ -4,6 +4,7 @@ import { readSongPreferences, preferredStemState, refreshSongPreferences } from 
 import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
+import { tryNativePlayback, releaseNativePlayback, syncNativeGain, requireBrowserPlayback } from './native-playback.js';
 import { publishAudioGraph, retractAudioGraph } from './audio-graph-publish.js';
 import {
     setupStreaming, resetStreamState, streamingSupported, isWavResponse, configureStreaming,
@@ -223,6 +224,7 @@ import {
 
     // ── Teardown ──
     function teardown() {
+        releaseNativePlayback();
         cleanupPointerHandlers();
         if (S.pollHandle !== null) {
             clearInterval(S.pollHandle);
@@ -311,6 +313,8 @@ import {
         // this point the #audio shims delegate to core's native/JUCE
         // behaviour, so archive and JUCE playback are untouched.
         S.sloppakActive = false;
+        S.browserPlaybackRequired = false;
+        S.browserHasPlayed = false;
         // Leave S.audioCtx alive — it is reused across songs to avoid browser
         // "too many AudioContexts" warnings.
     }
@@ -736,6 +740,7 @@ import {
         // range the mixer's "Song" fader drives — clamping at 1 lost the top
         // half of the fader's boost range.
         S.masterGain.gain.value = Math.max(0, Math.min(2, v));
+        syncNativeGain();
     }
     function installSongFaderBridge() {
         if (!window.slopsmith) return;
@@ -753,6 +758,7 @@ import {
     // plugins (e.g. highway_3d) can read the stems instead of #audio, which
     // is now silent. Returns null when no sloppak is loaded.
     function getAnalyser() {
+        if (S.analyserNode) requireBrowserPlayback();
         return S.analyserNode;
     }
     function exposeStemsGlobals() {
@@ -811,6 +817,7 @@ import {
         const core = document.getElementById('audio');
         if (core) {
             if (!nativeCorePaused(core)) {
+                S.browserHasPlayed = true;
                 S.pendingPlay = true;
                 transport.baseOffset = nativeCoreTime(core);
             }
@@ -923,6 +930,8 @@ import {
         S.buffersReady = true;
         emitStemsState('provider-ready', { stemCount: S.stemState.length, stemIds: S.stemState.map(s => s.id), stems: stemsMetaPayload() });
 
+        await tryNativePlayback();
+        if (gen !== S.loadGeneration) return;
         if (S.pendingPlay) { S.pendingPlay = false; transportPlay(); }
     }
 
@@ -1092,6 +1101,7 @@ import {
                 if (!acceptLoad(ref)) return;
                 S.liveInfoReady = true;
                 if (!tryInitForCurrentSong()) startReadyPoll();
+                void tryNativePlayback();
             },
             onPlaybackStopped() {
                 lightStop();
