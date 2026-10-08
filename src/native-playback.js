@@ -137,7 +137,14 @@ export async function tryNativePlayback() {
     try {
         const lease = await host.acquire({
             ownerId: 'stems', url: S.stemState[0].url, isCurrent,
-            onEnded: () => { if (r && current(r)) hooks.ended(); },
+            onEnded: () => {
+                if (!r || !current(r)) return;
+                // Native sample clocks may stop a fraction below the decoded
+                // duration. Core validates ended events against the exact media
+                // endpoint, so publish that endpoint before dispatching ended.
+                r.positionOverride = transport.duration;
+                hooks.ended();
+            },
             onLost: ({ position, stopped }) => {
                 if (!r || !current(r)) return;
                 if (!stopped) {
