@@ -20,7 +20,8 @@ configureNativePlayback({
     browserTime: () => transportPlayhead(), stopBrowser: () => stopSources(),
     playCurrent: () => transportPlay(),
     event: type => dispatchAudioEvent(type), ended: () => handleNaturalEnd(),
-    restoreBrowser(position, play, rate) {
+    async restoreBrowser(position, play, rate) {
+        if (S.restoreBrowser) return S.restoreBrowser(position, play, rate);
         transport.playing = false;
         transportSeek(position);
         transport.rate = -1; setTransportRate(rate);

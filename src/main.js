@@ -224,6 +224,7 @@ import {
 
     // ── Teardown ──
     function teardown() {
+        S.restoreBrowser = null;
         releaseNativePlayback();
         cleanupPointerHandlers();
         if (S.pollHandle !== null) {
@@ -758,6 +759,8 @@ import {
     // plugins (e.g. highway_3d) can read the stems instead of #audio, which
     // is now silent. Returns null when no sloppak is loaded.
     function getAnalyser() {
+        const native = window.feedBack?.audioSession?.nativeBacking?.getAnalyser?.();
+        if (native) return native;
         if (S.analyserNode) requireBrowserPlayback();
         return S.analyserNode;
     }
@@ -772,7 +775,7 @@ import {
     }
 
     // ── Main entry: called after song_info arrives ──
-    async function onSongReady() {
+    async function onSongReady(resume = null) {
         teardown();
         // Capture this load BEFORE the first await. A preload, ready event, or
         // leaving the player can supersede us during cold worklet registration.
@@ -785,17 +788,27 @@ import {
         // these fields".
         if (stems.length === 0) { emitStemsState('provider-ready', { stemCount: 0, stemIds: [], stems: [] }); return; }
 
-        ensureCtx();
-        // Decide per-song whether the pitch-preserving worklet is available.
-        // Done before buildGraphFromBuffers so the graph is built for the right
-        // path. Falls back to legacy (pitch-coupling) playback otherwise.
-        const useWorklet = await ensureWorklet();
-        if (gen !== S.loadGeneration) return;
-        S.useWorklet = useWorklet;
-        if (!S.useWorklet && !S.workletWarned) {
-            S.workletWarned = true;
-            console.warn('[stems] AudioWorklet unavailable — speed control will change pitch (legacy mode)');
+        const nativeHost = window.feedBack?.audioSession?.nativeBacking;
+        const nativeCandidate = !resume && nativeHost?.sessionVersion === 2 && S.liveInfoReady;
+        async function prepareBrowser() {
+            if (nativeHost?.isBrowserFallbackSafe?.() === false) {
+                S.pendingPlay = false;
+                S.pendingPlayResolvers?.splice(0).forEach(resolve => resolve(false));
+                console.error('[stems] Native audio could not stop; browser playback remains paused');
+                return false;
+            }
+            ensureCtx();
+            const useWorklet = await ensureWorklet();
+            if (gen !== S.loadGeneration) return false;
+            S.useWorklet = useWorklet;
+            if (!S.useWorklet && !S.workletWarned) {
+                S.workletWarned = true;
+                console.warn('[stems] AudioWorklet unavailable — speed control will change pitch (legacy mode)');
+            }
+            return true;
         }
+        if (!nativeCandidate && !await prepareBrowser()) return;
+
         // Retry shim install in case #audio wasn't in the DOM when installHooks()
         // ran (no-op once installed). Without the shims the transport can't drive
         // the highway, so a sloppak must NOT proceed past here unshimmed —
@@ -823,6 +836,48 @@ import {
             }
             nativeCorePause(core);
         }
+
+        if (resume) {
+            S.browserPlaybackRequired = true;
+            S.pendingPlay = resume.play;
+            transport.baseOffset = resume.position;
+            transport.rate = resume.rate;
+            for (const [id, state] of resume.preferences) preferenceEdits.set(id, state);
+        }
+
+        // Native preparation resolves local assets and streams bounded decode
+        // queues. Do this before creating any browser graph or fetching PCM.
+        if (nativeCandidate && !S.browserHasPlayed) {
+            const preferences = readSongPreferences(S.currentFilename, S.currentSongKey);
+            S.masterGain = { gain: { value: persistedSongGain() }, disconnect() {} };
+            S.stemState = stems.map((stem, index) => {
+                const { on, vol } = { ...preferredStemState(stem, preferences), ...preferenceEdits.get(stem.id) };
+                const gain = makeStemGainHandle(index);
+                gain.gain.value = on ? vol : 0;
+                return { ...stem, on, vol, gain, source: null, buffer: null };
+            });
+            const coreRate = Number(core?.playbackRate);
+            transport.rate = Number.isFinite(coreRate) && coreRate > 0 ? coreRate : 1;
+            S.restoreBrowser = (position, play, rate) => onSongReady({ position, play, rate,
+                preferences: S.stemState.map(stem => [stem.id, { on: stem.on, vol: stem.vol }]),
+                master: S.masterGain.gain.value });
+            const prepared = await tryNativePlayback({ fullMixUrl: (info.has_full_mix || info.has_original_audio)
+                ? info.full_mix_url || info.original_audio_url : null });
+            if (gen !== S.loadGeneration) return;
+            if (prepared) {
+                S.buffersReady = true;
+                registerStemMixParticipants();
+                registerStemOwnerStatus('available');
+                hideOverlay(); injectUI(); installSongFaderBridge();
+                emitStemsState('provider-ready', { stemCount: S.stemState.length, stemIds: S.stemState.map(s => s.id), stems: stemsMetaPayload() });
+                if (S.pendingPlay) { S.pendingPlay = false; transportPlay(); }
+                return;
+            }
+            S.restoreBrowser = null;
+            S.stemState = []; S.masterGain = null; S.fullTrackIndex = -1;
+        }
+
+        if (nativeCandidate && !await prepareBrowser()) return;
 
         S.abortController = new AbortController();
 
@@ -924,6 +979,7 @@ import {
             }
             return;
         }
+        if (resume) { transport.rate = resume.rate; S.masterGain.gain.value = resume.master; }
         hideOverlay();
         injectUI();
         installSongFaderBridge();
@@ -1028,6 +1084,9 @@ import {
     }
 
     function tryInitForCurrentSong() {
+        // Native leases are validated against Core's live asset list. Wait for
+        // ready instead of decoding a second full copy during metadata preload.
+        if (window.feedBack?.audioSession?.nativeBacking?.sessionVersion === 2 && !S.liveInfoReady) return false;
         const info = currentSongInfo();
         if (!info || !Array.isArray(info.stems)) return false;
         const signature = songInfoSignature(info);
@@ -1592,6 +1651,7 @@ import {
             if (applied) registerStemOwnerStatus('available');
             return applied ? clamped : undefined;
         },
+        getMasterVolume: () => S.masterGain?.gain?.value ?? 1,
         setMuted(id, muted) {
             const m = coerceBool(muted);
             const target = String(id).toLowerCase();
@@ -1605,7 +1665,7 @@ import {
                 saveMuted(storageSongKey(), S.stemState);
                 applied = true;
             }
-            if (applied) registerStemOwnerStatus('available');
+            if (applied) { applyMixRouting(); syncNativeGain(); registerStemOwnerStatus('available'); }
         },
     };
     Object.defineProperty(stemsApi, 'stemState', {

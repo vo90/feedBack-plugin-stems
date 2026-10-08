@@ -1,6 +1,5 @@
-// Stems retains control ownership and its decoded browser graph. A single stem
-// may borrow Core's native backing player; the graph stays stopped until a
-// confirmed native stop permits fallback. Older/browser hosts need no adapter.
+// Stems retains control ownership. Version 2 sessions stream bounded native
+// sources; a browser graph is built lazily only after a confirmed native stop.
 import { S, ST, transport } from './state.js';
 
 let hooks = null, pending = null, attemptedGeneration = -1;
@@ -32,6 +31,7 @@ export function nativePlaybackTime() {
 function current(r) { return S.nativePlayback === r && S.loadGeneration === r.generation; }
 function gain() {
     const master = Number(S.masterGain?.gain.value), stem = Number(S.stemState[0]?.gain?.gain.value);
+    if (S.nativePlayback?.lease.sessionVersion === 2) return Number.isFinite(master) ? Math.max(0, Math.min(2, master)) : 0;
     return Number.isFinite(master) && Number.isFinite(stem) ? Math.max(0, Math.min(2, master * stem)) : 0;
 }
 function failed(r) {
@@ -49,13 +49,14 @@ export function syncNativeGain() {
     const r = S.nativePlayback;
     if (!r || r.failing) return;
     // Coalesce fader/automation writes while one IPC is pending.
-    r.nextGain = gain();
+    r.nextGain = { master: gain(), sources: S.stemState.map(stem => Math.max(0, Math.min(2, Number(stem.gain?.gain.value) || 0))) };
     if (r.gainBusy) return;
     r.gainBusy = true;
     void (async () => {
         while (current(r) && !r.failing && r.nextGain !== null) {
             const value = r.nextGain; r.nextGain = null;
-            if (!await run(r, () => r.lease.setGain(value))) break;
+            if (!await run(r, () => r.lease.setGain(value.master))) break;
+            if (r.lease.sessionVersion === 2 && !await run(r, () => r.lease.setSourceGains(value.sources))) break;
         }
         r.gainBusy = false;
     })();
@@ -118,14 +119,16 @@ export function releaseNativePlayback() {
     if (r) { ++r.intent; void r.lease.release('song-change'); }
 }
 
-export async function tryNativePlayback() {
+export async function tryNativePlayback(descriptor = null) {
     const host = globalThis.window?.feedBack?.audioSession?.nativeBacking;
+    const session = descriptor && host?.sessionVersion === 2;
     // Worklet gain handles observe every automation write. Streaming/legacy
     // graphs and multiple stems remain on their existing browser transports.
-    if (!hooks || host?.version !== 1 || !S.liveInfoReady || !S.buffersReady || !S.useWorklet
-        || ST.streaming || S.fullTrackIndex >= 0 || S.browserPlaybackRequired
+    if (!hooks || host?.version !== 1 || !S.liveInfoReady
+        || (!session && (!S.buffersReady || !S.useWorklet || ST.streaming || S.fullTrackIndex >= 0 || S.stemState.length !== 1))
+        || S.browserPlaybackRequired
         || transport.playing || S.browserHasPlayed
-        || S.stemState.length !== 1 || S.nativePlayback || pending
+        || !S.stemState.length || S.nativePlayback || pending
         || attemptedGeneration === S.loadGeneration) return false;
     const generation = S.loadGeneration;
     let finish;
@@ -137,6 +140,8 @@ export async function tryNativePlayback() {
     try {
         const lease = await host.acquire({
             ownerId: 'stems', url: S.stemState[0].url, isCurrent,
+            ...(session ? { sources: S.stemState.map(stem => ({ id: stem.id, url: stem.url, gain: stem.gain.gain.value })),
+                fullMix: descriptor.fullMixUrl ? { url: descriptor.fullMixUrl } : null } : {}),
             onEnded: () => {
                 if (!r || !current(r)) return;
                 // Native sample clocks may stop a fraction below the decoded
@@ -145,7 +150,7 @@ export async function tryNativePlayback() {
                 r.positionOverride = transport.duration;
                 hooks.ended();
             },
-            onLost: ({ position, stopped }) => {
+            onLost: async ({ position, stopped }) => {
                 if (!r || !current(r)) return;
                 if (!stopped) {
                     r.failing = true; r.wantsPlay = false; transport.playing = false;
@@ -156,7 +161,7 @@ export async function tryNativePlayback() {
                 const at = r.positionOverride ?? position;
                 const play = r.wantsPlay;
                 S.nativePlayback = null;
-                hooks.restoreBrowser(at, play, transport.rate);
+                await hooks.restoreBrowser(at, play, transport.rate);
             },
         });
         if (!lease) return false;
@@ -169,8 +174,13 @@ export async function tryNativePlayback() {
         r = S.nativePlayback = { lease, generation, intent: 0, seek: 0, wantsPlay: false,
             positionOverride: at, failing: false, nextGain: null, gainBusy: false };
         transport.playing = false;
+        if (session) {
+            transport.duration = lease.duration;
+            S.fullTrackIndex = lease.fullMixAccepted ? S.stemState.length : -1;
+        }
         // Queue preparation before exposing controls to the next event turn.
         const initial = [lease.seek(at), lease.setRate(transport.rate), lease.setGain(gain())];
+        if (session) initial.push(lease.setSourceGains(S.stemState.map(stem => stem.gain.gain.value)));
         r.initialized = Promise.all(initial).then(values => {
             const ok = values.every(Boolean) && current(r);
             if (ok && r.seek === 0) r.positionOverride = null;

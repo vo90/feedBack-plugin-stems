@@ -57,6 +57,24 @@ test('handoff preserves controls and combines song gain with stem gain and mute 
     await until(() => h.calls.at(-1)?.[0] === 'gain' && h.calls.at(-1)[1] === .1);
 });
 
+test('version 2 prepares multiple native sources without browser buffers and separates master from source gains', async () => {
+    const h = harness();
+    h.host.sessionVersion = 2; h.lease.sessionVersion = 2; h.lease.fullMixAccepted = true;
+    h.lease.setSourceGains = async gains => { h.calls.push(['sources', gains]); return true; };
+    S.buffersReady = false; S.useWorklet = false;
+    const second = { id: 'drums', url: '/drums.ogg', on: true, vol: 1, gain: makeStemGainHandle(1) };
+    S.stemState.push(second); second.gain.gain.value = 1;
+    assert.equal(await tryNativePlayback({ fullMixUrl: '/mix.ogg' }), true);
+    assert.equal(h.request().sources.length, 2);
+    assert.equal(h.request().fullMix.url, '/mix.ogg');
+    assert.equal(transport.duration, 100);
+    assert.ok(h.calls.some(c => c[0] === 'gain' && c[1] === .8));
+    assert.deepEqual(h.calls.find(c => c[0] === 'sources')[1], [.5, 1]);
+    second.gain.gain.value = 0;
+    await until(() => h.calls.at(-1)?.[0] === 'sources' && h.calls.at(-1)[1][1] === 0);
+    assert.equal(S.fullTrackIndex, 2);
+});
+
 test('native preparation uses the latest browser playhead, and teardown cancels an in-flight acquisition', async () => {
     for (const cancel of [false, true]) {
         const h = harness(), gate = deferred(); h.host.acquire = () => gate.promise;

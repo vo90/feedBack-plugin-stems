@@ -107,7 +107,7 @@ test('the live highway list wins once it arrives; the preload is only a stand-in
 test('the load path reads the shared accessor, not the highway directly', () => {
     // If onSongReady went back to highway.getSongInfo() it would find no stems at
     // song:loading time and the preload would silently do nothing.
-    const fn = block(SRC, 'async function onSongReady()');
+    const fn = block(SRC, 'async function onSongReady(');
     assert.match(fn, /currentSongInfo\s*\(\s*\)/,
         'onSongReady must accept a preloaded stem list');
     assert.doesNotMatch(fn, /highway\.getSongInfo/,

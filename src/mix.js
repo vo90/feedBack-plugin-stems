@@ -8,6 +8,7 @@ import { syncNativeGain } from './native-playback.js';
 // Recompute every stem's gain from S.stemState and post them to the worklet.
 // No-op unless the worklet is live and ready to receive gain messages.
 export function applyMixRouting() {
+    syncNativeGain();
     if (!(S.useWorklet && S.workletNode && S.workletPostReady)) return;
     const { stemGains, fullGain } = computeMixGains(S.stemState, S.fullTrackIndex >= 0);
     for (let i = 0; i < stemGains.length; i++) {
@@ -32,7 +33,6 @@ export function makeStemGainHandle(index) {
         set(nv) {
             const num = Number(nv);
             value = Number.isFinite(num) ? num : 0;
-            syncNativeGain();
             // With a pristine full-mix track loaded, every stem change must
             // re-evaluate unity routing (which also flips the full track), so
             // route through applyMixRouting; it posts the authoritative gain
@@ -50,6 +50,7 @@ export function makeStemGainHandle(index) {
             } else if (S.workletPostReady && S.workletNode) {
                 try { S.workletNode.port.postMessage({ type: 'gain', index, value }); } catch (_) {}
             }
+            syncNativeGain();
         },
     });
     // connect/disconnect are no-ops: external consumers (e.g. stem_mixer)

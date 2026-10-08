@@ -43,6 +43,7 @@ export const S = {
     preloadGen: 0,
     sloppakActive: false,           // true while a sloppak owns #audio transport
     nativePlayback: null,          // optional Core lease; Stems still owns controls
+    restoreBrowser: null,          // lazy compatibility graph for native sessions
     browserPlaybackRequired: false, // live analyser/graph consumers retain browser DSP
     browserHasPlayed: false,       // never migrate a captured tail mid-song
     buffersReady: false,            // true once all stems are decoded + graphed
