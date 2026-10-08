@@ -42,6 +42,27 @@ function harness() {
 }
 const canonical = (id, key) => ({ payload: { sessionId:id,target:{settingsKey:key,targetId:id} } });
 
+for (const filename of [
+    'My feedpaks/FeedForge converted v2/2. RS DISCS/3 Doors Down - Kryptonite.feedpak',
+    'Mötley Crüe/50%20 + #1.feedpak',
+]) test(`encoded loading and raw ready identify the same song: ${filename}`, () => {
+    const h = harness();
+    h.hooks.onPlaybackLoading(canonical('encoded-load', 'key'));
+    h.hooks.onPlaybackLoading({ filename: encodeURIComponent(filename) });
+    assert.deepEqual(h.calls.preloads, [filename], 'preload must receive the raw filename');
+    h.live(filename);
+    h.hooks.onPlaybackReady(canonical('encoded-load', 'key'));
+    h.hooks.onPlaybackReady({ filename });
+    assert.equal(h.S.currentFilename, filename);
+    assert.equal(h.calls.builds, 1, 'live stem metadata must initialize the graph even without preload');
+});
+
+test('malformed legacy filename escapes do not throw from the loading listener', () => {
+    const h = harness();
+    assert.doesNotThrow(() => h.hooks.onPlaybackLoading({ filename: 'Legacy 100%.feedpak' }));
+    assert.deepEqual(h.calls.preloads, ['Legacy 100%.feedpak']);
+});
+
 for(const reverse of [false,true]) test(`real hooks coalesce aliases, key promotion reuses graph (reverse=${reverse})`,()=>{
     const h=harness();
     const load=[canonical('one','provisional'),{filename:'A'}];

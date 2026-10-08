@@ -953,14 +953,22 @@ import {
     // present on every playback:* emit), so both paths resolve the song key
     // from one place — a ready that arrives without a preceding loading still
     // gets the correct key.
-    function songRefFromDetail(detail = {}) {
+    function songRefFromDetail(detail = {}, loading = false) {
         const payload = detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : (detail || {});
         const target = payload.target && typeof payload.target === 'object' ? payload.target : {};
+        let filename = payload.filename || target.filename || null;
+        // Core's loading event carries playSong's URI component, while ready
+        // events and currentSong carry the raw library filename. Decode once
+        // at this boundary so preload URLs and load identity agree. Never
+        // decode ready filenames: a literal "%20" may be part of their name.
+        if (loading && filename) {
+            try { filename = decodeURIComponent(filename); } catch (_) { /* Legacy raw percent. */ }
+        }
         return {
             sessionId: payload.sessionId || null,
             targetId: target.targetId || null,
             songKey: target.settingsKey || payload.settingsKey || null,
-            filename: payload.filename || target.filename || null,
+            filename,
         };
     }
 
@@ -1076,7 +1084,7 @@ import {
         const hookState = window.__slopsmithStemsHooks || (window.__slopsmithStemsHooks = {});
         hookState.impl = {
             onPlaybackLoading(detail = {}) {
-                const ref = loadIdentity.loading(songRefFromDetail(detail));
+                const ref = loadIdentity.loading(songRefFromDetail(detail, true));
                 if (!acceptLoad(ref)) return;
                 // Get the whole load underway NOW — before the highway (and the
                 // venue) is on screen. See preloadSong for why that matters.
