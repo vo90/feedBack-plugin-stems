@@ -21,7 +21,7 @@ function harness() {
     const S = { loadGeneration: 0, pendingPlay: false, sloppakActive: false, stemState: [] };
     const calls = { pauses: 0, loads: [], builds: [], ready: 0, plays: 0 };
     let filename = 'old';
-    const scope = {
+    const scope = { tryNativePlayback: () => Promise.resolve(false),
         S, SH: { shimsUsable: true }, transport: { baseOffset: 0 }, AbortController,
         console: { warn() {}, error() {} },
         teardown() { S.loadGeneration++; S.sloppakActive = false; S.pendingPlay = false; },

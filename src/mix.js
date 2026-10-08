@@ -3,6 +3,7 @@
 // (mix-gains.js is the pure computation; this is the side-effecting worklet post.)
 import { S } from './state.js';
 import { computeMixGains } from './mix-gains.js';
+import { syncNativeGain } from './native-playback.js';
 
 // Recompute every stem's gain from S.stemState and post them to the worklet.
 // No-op unless the worklet is live and ready to receive gain messages.
@@ -31,6 +32,7 @@ export function makeStemGainHandle(index) {
         set(nv) {
             const num = Number(nv);
             value = Number.isFinite(num) ? num : 0;
+            syncNativeGain();
             // With a pristine full-mix track loaded, every stem change must
             // re-evaluate unity routing (which also flips the full track), so
             // route through applyMixRouting; it posts the authoritative gain

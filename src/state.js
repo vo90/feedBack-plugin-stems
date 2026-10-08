@@ -42,6 +42,9 @@ export const S = {
     preloadInfo: null,
     preloadGen: 0,
     sloppakActive: false,           // true while a sloppak owns #audio transport
+    nativePlayback: null,          // optional Core lease; Stems still owns controls
+    browserPlaybackRequired: false, // live analyser/graph consumers retain browser DSP
+    browserHasPlayed: false,       // never migrate a captured tail mid-song
     buffersReady: false,            // true once all stems are decoded + graphed
     pendingPlay: false,             // a play() arrived before buffers were ready
     pendingPlayResolvers: [],       // resolve fns for #audio.play() promises awaiting a deferred start

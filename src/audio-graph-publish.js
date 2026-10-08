@@ -5,12 +5,17 @@
 // deployment-agnostic: this plugin only says "here is my master"; what the
 // host does with it is the host's business.
 import { S } from './state.js';
+import { requireBrowserPlayback } from './native-playback.js';
 
 export function publishAudioGraph() {
     if (!window.slopsmith || !window.slopsmith.stems
             || typeof window.slopsmith.stems !== 'object') return;
     if (!S.audioCtx || !S.masterGain) return;
-    window.slopsmith.stems.audioGraph = { context: S.audioCtx, masterNode: S.masterGain };
+    const context = S.audioCtx, masterNode = S.masterGain;
+    window.slopsmith.stems.audioGraph = {
+        get context() { if (S.masterGain === masterNode) requireBrowserPlayback(); return context; },
+        get masterNode() { if (S.masterGain === masterNode) requireBrowserPlayback(); return masterNode; },
+    };
 }
 
 // Retract only if the published graph is still ours: the AudioContext is

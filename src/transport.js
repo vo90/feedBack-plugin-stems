@@ -12,6 +12,21 @@
 import { S, SH, ST, transport } from './state.js';
 import { resumeCtx, updateLatencyOffset } from './audio-ctx.js';
 import { repositionStream, streamOffsetBuffered } from './streaming.js';
+import { configureNativePlayback, nativePlaybackActive, nativePlaybackTime,
+    nativePlay, nativePause, nativeSeek, nativeRate, nativePreparationPending,
+    playAfterNativePreparation, cancelPreparedPlay } from './native-playback.js';
+
+configureNativePlayback({
+    browserTime: () => transportPlayhead(), stopBrowser: () => stopSources(),
+    playCurrent: () => transportPlay(),
+    event: type => dispatchAudioEvent(type), ended: () => handleNaturalEnd(),
+    restoreBrowser(position, play, rate) {
+        transport.playing = false;
+        transportSeek(position);
+        transport.rate = -1; setTransportRate(rate);
+        if (play) transportPlay({ silent: true });
+    },
+});
 
 // Scheduling lead for AudioBufferSourceNode.start(). Every stem's start() is
 // given the SAME `when` so all sources begin on the identical sample; the small
@@ -25,6 +40,7 @@ export function onWorkletMessage(e) {
         if (msg.latencyOutSamples > 0) S.workletLatencyOutSamples = msg.latencyOutSamples;
         updateLatencyOffset();
     } else if (msg.type === 'ended') {
+        if (nativePlaybackActive()) return; // late end from the retired browser source
         handleNaturalEnd();
     } else if (msg.type === 'pos') {
         // Streaming backpressure: the worklet reports its read frontier so
@@ -66,6 +82,7 @@ function transportPlayheadRaw() {
 // read frontier back by the WSOLA latency so the highway tracks what is
 // actually heard. Paused/stopped and legacy mode return the raw value.
 export function transportPlayhead() {
+    if (nativePlaybackActive()) return nativePlaybackTime();
     const raw = transportPlayheadRaw();
     if (!S.useWorklet || !transport.playing || S.latencyOffsetSec <= 0) return raw;
     const dur = transport.duration;
@@ -76,6 +93,7 @@ export function transportPlayhead() {
 // Stop + release every active source node. Detaching `onended` first
 // means the natural-end handler never fires for an intentional stop.
 export function stopSources() {
+    if (nativePlaybackActive()) { void nativePause(false); return; }
     if (S.useWorklet) {
         // The worklet node lives for the whole song; just tell it to stop
         // advancing and go silent. It is disconnected/disposed in teardown().
@@ -169,7 +187,9 @@ export function flushPendingPlayResolvers() {
     }
 }
 
-export function transportPlay() {
+export function transportPlay(options = {}) {
+    if (nativePlaybackActive()) return nativePlay().finally(flushPendingPlayResolvers);
+    if (nativePreparationPending()) return playAfterNativePreparation();
     resumeCtx();
     if (!S.buffersReady) { S.pendingPlay = true; return; }
     if (transport.playing) { flushPendingPlayResolvers(); return; }
@@ -185,13 +205,18 @@ export function transportPlay() {
     startSources(offset);
     // startSources may have skipped every stem (all exhausted at offset).
     // Only fire `play` if playback actually began.
-    if (transport.playing) dispatchAudioEvent('play');
+    if (transport.playing) {
+        S.browserHasPlayed = true;
+        if (!options.silent) dispatchAudioEvent('play');
+    }
     flushPendingPlayResolvers();
 }
 
 function transportPause() {
+    cancelPreparedPlay();
     S.pendingPlay = false;
     flushPendingPlayResolvers();
+    if (nativePlaybackActive()) { void nativePause(); return; }
     if (!transport.playing) return;
     const ph = transportPlayhead();
     stopSources();
@@ -211,8 +236,10 @@ function transportPause() {
 // Full teardown() stays reserved for playback:ended and the new-song-load /
 // screen-leave paths.
 export function lightStop() {
+    cancelPreparedPlay();
     S.pendingPlay = false;
     flushPendingPlayResolvers();
+    if (nativePlaybackActive()) { void nativePause(false); return; }
     if (!transport.playing) return;
     const ph = transportPlayhead();
     stopSources();
@@ -225,6 +252,7 @@ function transportSeek(t) {
     let target = Number(t);
     if (!Number.isFinite(target)) return;
     target = Math.max(0, dur > 0 ? Math.min(target, dur) : target);
+    if (nativePlaybackActive()) { void nativeSeek(target); return; }
     if (ST.streaming) {
         // Streaming: flush the bounded window and refetch every track from
         // the target (repositionStream posts the worklet 'seek'). Re-baseline
@@ -259,6 +287,7 @@ function setTransportRate(r) {
     const rate = Number(r);
     if (!Number.isFinite(rate) || rate <= 0) return;
     if (transport.rate === rate) return;
+    if (nativePlaybackActive()) { transport.rate = rate; void nativeRate(rate); return; }
     if (transport.playing && S.audioCtx) {
         // Re-baseline so the playhead stays continuous across the change.
         // Use the RAW frontier (not latency-compensated): the new latency
@@ -414,6 +443,8 @@ export function installAudioShims() {
             writable: true,
             value: function () {
                 if (S.sloppakActive) {
+                    if (nativePlaybackActive()) return nativePlay();
+                    if (nativePreparationPending()) return playAfterNativePreparation();
                     transportPlay();
                     // Resolve immediately if playback actually started; otherwise
                     // return a promise that settles when the deferred play starts
